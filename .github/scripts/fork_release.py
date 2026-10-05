@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select an unbuilt upstream tag and merge fork main into its release branch."""
+"""Merge fork main into a new upstream release or the latest fork release."""
 
 import os
 from pathlib import Path
@@ -14,11 +14,15 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
-def select_tag(tags, baseline, completed, requested=""):
+def select_tag(tags, baseline, completed, requested="", *, release_branches=(), rebuild_latest=False):
     if requested:
         if not RELEASE_TAG.fullmatch(requested) or requested not in tags:
             raise ValueError(f"Not an upstream release tag: {requested!r}")
         return requested
+    if rebuild_latest:
+        # Reuse the newest release branch, including its previous conflict resolutions.
+        # Bootstrap from the latest upstream tag only when no release branch exists yet.
+        return next((tag for tag in reversed(tags) if tag in release_branches), tags[-1] if tags else "")
     return next((tag for tag in tags if tag not in baseline and tag not in completed), "")
 
 
@@ -57,22 +61,35 @@ def main():
     completed = set(git(
         "for-each-ref", "--format=%(refname:strip=3)", "refs/tags/fork-built/"
     ).splitlines())
-    tag = select_tag(tags, baseline, completed, os.environ.get("REQUESTED_TAG", ""))
+    release_branches = set(git(
+        "for-each-ref", "--format=%(refname:strip=4)", "refs/remotes/origin/fork-release/"
+    ).splitlines())
+    rebuild_latest = os.environ.get("REBUILD_LATEST") == "true"
+    tag = select_tag(
+        tags, baseline, completed, os.environ.get("REQUESTED_TAG", ""),
+        release_branches=release_branches, rebuild_latest=rebuild_latest,
+    )
     outputs = {"tag": tag}
     if tag:
         main_sha = git("rev-parse", "refs/remotes/origin/main")
         upstream_sha = git("rev-parse", f"refs/upstream-tags/{tag}^{{commit}}")
         branch, sha = merge_release(tag, main_sha)
         git("push", "origin", f"HEAD:refs/heads/{branch}")
+        # A newer upstream tag may still be waiting for its first build. Refresh
+        # latest for the current release until a newer release has been published.
+        publish_latest = tag == tags[-1] or (
+            rebuild_latest and not any(newer in completed for newer in tags[tags.index(tag) + 1:])
+        )
         outputs.update(
             sha=sha, main_sha=main_sha, upstream_sha=upstream_sha,
             version=f"{tag}-fork.{sha[:12]}",
             image=f"ghcr.io/{os.environ['GITHUB_REPOSITORY'].lower()}",
-            latest=str(tag == tags[-1]).lower(),
+            latest=str(publish_latest).lower(),
         )
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             summary.write(
                 f"### Fork release {tag}\n\n"
+                f"- Trigger: {'main update' if rebuild_latest else 'upstream release / manual rebuild'}\n"
                 f"- Upstream: `{upstream_sha}`\n- Fork main: `{main_sha}`\n"
                 f"- Merged source: `{sha}` on `{branch}`\n"
                 f"- Image: `{outputs['image']}:{outputs['version']}`\n"

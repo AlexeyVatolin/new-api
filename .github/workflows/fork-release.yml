@@ -11,10 +11,6 @@ on:
         type: string
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/fork-release.yml'
-      - '.github/scripts/fork_release.py'
-      - '.github/fork-release-baseline.txt'
     tags: ['v*']
 
 # Serial publication keeps release branches and latest from racing.
@@ -57,6 +53,7 @@ jobs:
         id: prepare
         env:
           REQUESTED_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+          REBUILD_LATEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: python3 .github/scripts/fork_release.py
 
   build:
