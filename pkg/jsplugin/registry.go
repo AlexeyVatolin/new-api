@@ -380,7 +380,7 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 		required := make(map[string]struct{})
 		allowed := make(map[string]struct{})
 		modeHookUsers := make(map[string][]string)
-		for _, operation := range definition.Operations {
+		for _, operation := range claim.Operations() {
 			for _, hook := range operation.RequiredProtocolMembers {
 				required[hook] = struct{}{}
 				allowed[hook] = struct{}{}
@@ -862,6 +862,7 @@ func cloneMeta(meta Meta) Meta {
 	for index := range meta.Protocols {
 		meta.Protocols[index].Models = append([]string(nil), meta.Protocols[index].Models...)
 		meta.Protocols[index].Supports = append([]string(nil), meta.Protocols[index].Supports...)
+		meta.Protocols[index].Routes = slices.Clone(meta.Protocols[index].Routes)
 	}
 	if meta.Description != nil {
 		meta.Description = maps.Clone(meta.Description)
@@ -1380,6 +1381,45 @@ func normalizeV1Meta(meta *Meta) error {
 		if !known {
 			return fmt.Errorf("plugin meta protocol %q is unknown", claim.Name)
 		}
+		if claim.Routes != nil && len(claim.Routes) == 0 {
+			return fmt.Errorf("plugin protocol routes must be a non-empty array")
+		}
+		seenRoutes := make(map[string]bool)
+		for routeIndex := range claim.Routes {
+			route := &claim.Routes[routeIndex]
+			var err error
+			route.Method, err = normalizeRouteMethod(route.Method)
+			if err != nil {
+				return err
+			}
+			route.Path, err = NormalizeRoutePath(route.Path)
+			if err != nil {
+				return err
+			}
+			if strings.ContainsAny(route.Path, ":*") || route.Path == "/" {
+				return fmt.Errorf("plugin protocol route must have a literal non-root path")
+			}
+			if namespace, reserved := intersectingReservedNamespace(route.Path); reserved {
+				return fmt.Errorf("plugin protocol route %q intersects reserved namespace %s", route.Path, namespace)
+			}
+			if !protocolOperationNamePattern.MatchString(route.Operation) {
+				return fmt.Errorf("plugin protocol route has invalid operation %q", route.Operation)
+			}
+			validBase := false
+			for _, base := range definition.Operations {
+				if base.Name == route.Extends && base.ModelField != "" && slices.Contains(base.Methods, route.Method) {
+					validBase = true
+				}
+			}
+			if !validBase {
+				return fmt.Errorf("plugin protocol route %s %s must extend a submission operation of %s with the same method", route.Method, route.Path, claim.Name)
+			}
+			key := route.Method + " " + route.Path
+			if seenRoutes[key] {
+				return fmt.Errorf("duplicate plugin protocol route %s", key)
+			}
+			seenRoutes[key] = true
+		}
 		if _, duplicate := protocols[claim.Name]; duplicate {
 			return fmt.Errorf("plugin meta protocols must be unique")
 		}
@@ -1829,7 +1869,7 @@ func decodeProtocolClaims(object map[string]any, name string) ([]ProtocolClaim, 
 		case map[string]any:
 			for key := range entry {
 				switch key {
-				case "name", "models", "supports":
+				case "name", "models", "supports", "routes":
 				default:
 					return nil, fmt.Errorf("plugin meta protocol %d has unknown field %q", index, key)
 				}
@@ -1838,6 +1878,30 @@ func decodeProtocolClaims(object map[string]any, name string) ([]ProtocolClaim, 
 			var err error
 			if claim.Name, err = stringMetaField(entry, "name"); err != nil {
 				return nil, err
+			}
+			if value, exists := entry["routes"]; exists {
+				routes, ok := value.([]any)
+				if !ok || len(routes) == 0 {
+					return nil, fmt.Errorf("plugin protocol routes must be a non-empty array")
+				}
+				for _, value := range routes {
+					object, ok := value.(map[string]any)
+					if !ok {
+						return nil, fmt.Errorf("plugin protocol route must be an object")
+					}
+					for key := range object {
+						if key != "method" && key != "path" && key != "operation" && key != "extends" {
+							return nil, fmt.Errorf("unknown plugin protocol route field %q", key)
+						}
+					}
+					var route ProtocolRoute
+					for key, target := range map[string]*string{"method": &route.Method, "path": &route.Path, "operation": &route.Operation, "extends": &route.Extends} {
+						if *target, err = stringMetaField(object, key); err != nil {
+							return nil, err
+						}
+					}
+					claim.Routes = append(claim.Routes, route)
+				}
 			}
 			if _, exists := entry["models"]; exists {
 				if claim.Models, err = strictStringSlice(entry, "models"); err != nil {

@@ -27,6 +27,12 @@ export type TaskPluginProtocolClaim =
       name: string
       models?: string[]
       supports?: ('stream' | 'sync' | 'background')[]
+      routes?: {
+        method: 'POST'
+        path: string
+        operation: string
+        extends: 'create' | 'generate' | 'edit'
+      }[]
     }
 
 /**

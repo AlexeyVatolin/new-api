@@ -218,7 +218,32 @@ func (b *pluginGenerationBuilder) admitPlugins(
 }
 
 func (b *pluginGenerationBuilder) validatePlugin(plugin *jsplugin.LoadedPlugin, accepted map[string]*jsplugin.LoadedPlugin) error {
+	for _, claim := range plugin.Meta.Protocols {
+		for _, route := range claim.Routes {
+			for _, staticRoute := range b.staticRoutes {
+				if route.Method == staticRoute.Method && routeIntersectsStaticRoute(route.Path, staticRoute.Path) {
+					return fmt.Errorf("protocol route %s %s intersects static route %s", route.Method, route.Path, staticRoute.Path)
+				}
+			}
+			for _, owner := range append([]*jsplugin.LoadedPlugin{plugin}, sortedPlugins(accepted)...) {
+				for _, native := range owner.Meta.Routes {
+					if routePatternsIntersect(route.Path, native.Path) {
+						return fmt.Errorf("protocol route %s overlaps native route of plugin %s", route.Path, owner.Meta.Key)
+					}
+				}
+			}
+		}
+	}
 	for _, route := range plugin.Meta.Routes {
+		for _, other := range accepted {
+			for _, claim := range other.Meta.Protocols {
+				for _, shared := range claim.Routes {
+					if routePatternsIntersect(route.Path, shared.Path) {
+						return fmt.Errorf("native route %s overlaps protocol route of plugin %s", route.Path, other.Meta.Key)
+					}
+				}
+			}
+		}
 		for _, staticRoute := range b.staticRoutes {
 			if routeIntersectsStaticRoute(route.Path, staticRoute.Path) {
 				return fmt.Errorf("route %s %s intersects static route %s %s", route.Method, route.Path, staticRoute.Method, staticRoute.Path)
@@ -294,6 +319,21 @@ func (b *pluginGenerationBuilder) buildInnerEngine(generation *jsplugin.RoutingG
 	for _, binding := range generation.Routes() {
 		currentPlugin = binding.Plugin.Meta.Key
 		b.registerRoute(engine, binding, b.routeHandlers(generation, binding))
+	}
+	currentPlugin = ""
+	for _, binding := range generation.ProtocolRoutes() {
+		handlers, handlerErr := taskPluginProtocolHandlers(binding.Protocol, binding.Operation.BaseOperation)
+		if handlerErr != nil {
+			return nil, "", handlerErr
+		}
+		pin := func(c *gin.Context) {
+			pinnedGeneration := generation
+			if state, _ := c.Request.Context().Value(pluginDispatchStateKey{}).(*pluginDispatchState); state != nil && state.generation != nil {
+				pinnedGeneration = state.generation
+			}
+			c.Set(jsplugin.ContextKeyProtocolRoute, jsplugin.PinnedProtocolRoute{Generation: pinnedGeneration, ProtocolRouteBinding: binding})
+		}
+		engine.Handle(binding.Operation.Methods[0], binding.Operation.Path, append([]gin.HandlerFunc{pin}, handlers...)...)
 	}
 	currentPlugin = ""
 	return engine, "", nil

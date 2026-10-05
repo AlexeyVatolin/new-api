@@ -36,6 +36,16 @@ export const pluginProtocolClaimsSchema = z.array(
       name: nonemptyString,
       models: z.array(nonemptyString).optional(),
       supports: z.array(z.enum(['stream', 'sync', 'background'])).optional(),
+      routes: z
+        .array(
+          z.object({
+            method: z.literal('POST'),
+            path: nonemptyString,
+            operation: nonemptyString,
+            extends: z.enum(['create', 'generate', 'edit']),
+          })
+        )
+        .optional(),
     }),
   ])
 )

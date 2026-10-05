@@ -46,10 +46,49 @@ type Route struct {
 // Supports names the request forms a mode-bearing protocol accepts; decode
 // and normalize rewrite it into host-table order.
 type ProtocolClaim struct {
-	Name       string   `json:"name"`
-	Models     []string `json:"models,omitempty"`
-	Supports   []string `json:"supports,omitempty"`
+	Name       string          `json:"name"`
+	Models     []string        `json:"models,omitempty"`
+	Supports   []string        `json:"supports,omitempty"`
+	Routes     []ProtocolRoute `json:"routes,omitempty"`
 	objectForm bool
+}
+
+// ProtocolRoute adds a shared submission URL with an existing host operation's semantics.
+type ProtocolRoute struct {
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	Operation string `json:"operation"`
+	Extends   string `json:"extends"`
+}
+
+func (p ProtocolClaim) Operations() []HostProtocolOperation {
+	definition, _ := HostProtocol(p.Name)
+	operations := slices.Clone(definition.Operations)
+	for _, route := range p.Routes {
+		for _, base := range definition.Operations {
+			if base.Name != route.Extends {
+				continue
+			}
+			operation := base
+			operation.Name, operation.Path = route.Operation, route.Path
+			operation.Methods = []string{route.Method}
+			operation.BaseOperation, operation.BasePath = base.Name, base.Path
+			operations = append(operations, operation)
+			break
+		}
+	}
+	return operations
+}
+
+type ProtocolRouteBinding struct {
+	Protocol  string
+	Operation HostProtocolOperation
+}
+
+// PinnedProtocolRoute holds the same routing generation used by the inner router.
+type PinnedProtocolRoute struct {
+	Generation *RoutingGeneration
+	ProtocolRouteBinding
 }
 
 // ProtocolMode is one client request form a host protocol operation accepts
@@ -69,6 +108,8 @@ const (
 )
 
 type HostProtocolOperation struct {
+	BaseOperation           string
+	BasePath                string
 	Name                    string
 	Methods                 []string
 	Path                    string
@@ -216,6 +257,7 @@ const (
 	ContextKeyPinnedPlugin    = "task_plugin_pinned_plugin"
 	ContextKeyPinnedRoute     = "task_plugin_pinned_route"
 	ContextKeyPinnedEndpoint  = "task_plugin_pinned_endpoint"
+	ContextKeyProtocolRoute   = "task_plugin_protocol_route"
 	ContextKeyRouteRequest    = "task_plugin_route_request"
 	ContextKeyProtocolRequest = "task_plugin_protocol_request"
 )
@@ -352,6 +394,7 @@ type RoutingGeneration struct {
 	byChannelType        map[int]*LoadedPlugin
 	routeIndex           map[string]RouteBinding
 	protocolIndex        map[string][]ProtocolBinding
+	protocolRoutes       map[string]ProtocolRouteBinding
 	plugins              []*LoadedPlugin
 	routes               []RouteBinding
 	runtime              http.Handler
@@ -359,10 +402,11 @@ type RoutingGeneration struct {
 }
 
 var (
-	routeMethodPattern = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE)$`)
-	pathNamePattern    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	staticSegment      = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
-	memberNamePattern  = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+	routeMethodPattern           = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE)$`)
+	pathNamePattern              = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	staticSegment                = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+	memberNamePattern            = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+	protocolOperationNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 )
 
 var reservedRouteNamespaces = []string{
@@ -525,6 +569,28 @@ func (g *RoutingGeneration) Routes() []RouteBinding {
 		return nil
 	}
 	return append([]RouteBinding(nil), g.routes...)
+}
+
+func (g *RoutingGeneration) ProtocolRoutes() []ProtocolRouteBinding {
+	keys := make([]string, 0, len(g.protocolRoutes))
+	for key := range g.protocolRoutes {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	routes := make([]ProtocolRouteBinding, 0, len(keys))
+	for _, key := range keys {
+		routes = append(routes, g.protocolRoutes[key])
+	}
+	return routes
+}
+
+func (g *RoutingGeneration) LookupProtocolOperation(method, path string) (string, HostProtocolOperation, bool) {
+	if g != nil {
+		if route, ok := g.protocolRoutes[strings.ToUpper(method)+" "+path]; ok {
+			return route.Protocol, route.Operation, true
+		}
+	}
+	return LookupHostProtocolOperation(method, path)
 }
 
 // RuntimeHandler is the inner router built for this exact generation. It is
@@ -902,6 +968,7 @@ func buildRoutingGenerationFromPlugins(effective map[string]*LoadedPlugin, numbe
 		byChannelType:        make(map[int]*LoadedPlugin),
 		routeIndex:           make(map[string]RouteBinding),
 		protocolIndex:        make(map[string][]ProtocolBinding),
+		protocolRoutes:       make(map[string]ProtocolRouteBinding),
 		plugins:              make([]*LoadedPlugin, 0, len(effective)),
 	}
 	for _, key := range keys {
@@ -952,12 +1019,19 @@ func buildRoutingGenerationFromPlugins(effective map[string]*LoadedPlugin, numbe
 		}
 
 		for _, claim := range plugin.Meta.Protocols {
-			definition, _ := HostProtocol(claim.Name)
 			boundModels := plugin.Meta.Models
 			if len(claim.Models) > 0 {
 				boundModels = claim.Models
 			}
-			for _, operation := range definition.Operations {
+			for _, operation := range claim.Operations() {
+				if operation.BaseOperation != "" {
+					key := operation.Methods[0] + " " + operation.Path
+					if other, exists := generation.protocolRoutes[key]; exists &&
+						(other.Protocol != claim.Name || other.Operation.Name != operation.Name || other.Operation.BaseOperation != operation.BaseOperation) {
+						return nil, fmt.Errorf("plugin %s protocol route %s has incompatible declarations", plugin.Meta.Key, key)
+					}
+					generation.protocolRoutes[key] = ProtocolRouteBinding{Protocol: claim.Name, Operation: operation}
+				}
 				if operation.ModelField == "" {
 					continue
 				}

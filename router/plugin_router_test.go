@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,9 +16,13 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -914,4 +920,284 @@ func TestSecurityRoutesDisableCachingBeforeAuthentication(t *testing.T) {
 			assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
 		})
 	}
+}
+
+func sharedVideoPluginSource(key, routes string) string {
+	return fmt.Sprintf(`
+export const meta = {
+  apiVersion: 1, key: %q, name: "Shared video test", version: "1.0.0",
+  author: {name: "Test"}, models: ["shared-route-model"], fetchMode: "per_task",
+  allowedHosts: ["127.0.0.1"],
+  protocols: [{name: "openai_video", routes: %s}]
+};
+export const protocols = {openai_video: {
+  decodeRequest(ctx) {
+    const body = ctx.body.kind === "json" ? ctx.body.value : {prompt: ctx.body.fields.prompt[0]};
+    if (body.prompt === "reject-all" || (body.prompt === "reject-first" && meta.key === "provider-a")) throw new Error("unsupported request");
+    return {kind: "submit", model: ctx.model, action: ctx.operation, requestBody: {operation: ctx.operation, path: ctx.path, prompt: body.prompt}};
+  },
+  render(ctx, task) { return {provider: meta.key}; }
+}};
+export function buildSubmitRequest(ctx) {return {url: ctx.baseUrl + "/submit", method: "POST", body: ctx.requestBody};}
+export function parseSubmitResponse(ctx, response) {return {taskId: response.body.id, taskData: response.body};}
+export function buildQueryRequest(ctx) {return {url: ctx.baseUrl + "/query"};}
+export function parseTaskResult(ctx, body) {return {status: "IN_PROGRESS", progress: "0%%"};}
+export function listArtifacts() {return [];}
+export function buildContentRequest(ctx) {return {url: ctx.baseUrl + "/content"};}
+`, key, routes)
+}
+
+func TestSharedProtocolRouteUsesStandardSelectionRetryAndPermissions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousRegistry := jsplugin.DefaultRegistry
+	previousMemory, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	previousBatch, previousConsume := common.BatchUpdateEnabled, common.LogConsumeEnabled
+	previousRetry := common.RetryTimes
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	previousSQLitePath, previousMaster := common.SQLitePath, common.IsMasterNode
+	common.SQLitePath, common.IsMasterNode, common.RedisEnabled = t.TempDir()+"/shared-routes.db", false, false
+	t.Setenv("SQL_DSN", "")
+	require.NoError(t, model.InitDB())
+	database := model.DB
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.Ability{}, &model.Task{}, &model.Log{}, &model.UserSubscription{}))
+	model.DB, model.LOG_DB = database, database
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	common.BatchUpdateEnabled, common.LogConsumeEnabled = false, false
+	common.RetryTimes = 2
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"shared-route-model":0.01,"unclaimed-image":0.01}`))
+	t.Cleanup(func() {
+		sqlDB, err := database.DB()
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.SetDatabaseTypes(previousMainType, previousLogType)
+		common.SQLitePath, common.IsMasterNode = previousSQLitePath, previousMaster
+		jsplugin.DefaultRegistry = previousRegistry
+		common.MemoryCacheEnabled, common.RedisEnabled = previousMemory, previousRedis
+		common.BatchUpdateEnabled, common.LogConsumeEnabled = previousBatch, previousConsume
+		common.RetryTimes = previousRetry
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+	})
+	user := model.User{Username: "shared-route-user", Group: "default", Status: common.UserStatusEnabled, Role: common.RoleCommonUser, Quota: 1_000_000}
+	require.NoError(t, database.Create(&user).Error)
+	token := model.Token{UserId: user.Id, Key: "sharedroutefixture", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 1_000_000}
+	require.NoError(t, token.Insert())
+	limited := model.Token{UserId: user.Id, Key: "restrictedfixture", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 1_000_000, ModelLimitsEnabled: true, ModelLimits: "other-model"}
+	require.NoError(t, limited.Insert())
+	expired := model.Token{UserId: user.Id, Key: "expiredfixture", Status: common.TokenStatusEnabled, ExpiredTime: common.GetTimestamp() - 60, RemainQuota: 1_000_000}
+	require.NoError(t, expired.Insert())
+
+	var calls []string
+	var callsMu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provider := r.URL.Query().Get("provider")
+		var body map[string]any
+		if !assert.NoError(t, common.DecodeJson(r.Body, &body)) {
+			http.Error(w, "invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		callsMu.Lock()
+		calls = append(calls, provider)
+		sequence := len(calls)
+		callsMu.Unlock()
+		assert.Equal(t, "/submit", r.URL.Path)
+		assert.NotEmpty(t, body["operation"])
+		assert.NotEmpty(t, body["path"])
+		w.Header().Set("Content-Type", "application/json")
+		if provider == "provider-a" && body["prompt"] != "first-success" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"temporarily unavailable"}}`)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id":"upstream-%s-%d"}`, provider, sequence)
+	}))
+	defer upstream.Close()
+	registry := jsplugin.NewRegistry()
+	jsplugin.DefaultRegistry = registry
+	routes := `[{method:"POST",path:"/v1/videos/video-edit",operation:"video-edit",extends:"create"}, {method:"POST",path:"/v1/videos/video-extend",operation:"video-extend",extends:"create"}]`
+	var plugins []*jsplugin.LoadedPlugin
+	channels := make(map[string]int)
+	for index, key := range []string{"provider-a", "provider-b"} {
+		source := sharedVideoPluginSource(key, routes)
+		// Keep the fixture's host URL literal so the request uses the same real transport as production.
+		source = strings.Replace(source, `ctx.baseUrl + "/submit"`, `ctx.baseUrl + "/submit?provider=`+key+`"`, 1)
+		plugin, compileErr := jsplugin.CompilePlugin(source, jsplugin.Options{Key: key, Version: "1.0.0"})
+		require.NoError(t, compileErr)
+		plugins = append(plugins, plugin)
+		priority, autoBan := int64(10-index*10), 0
+		channel := model.Channel{Type: constant.ChannelTypeTaskPlugin, Name: key, Key: "test-vendor-key", BaseURL: &upstream.URL, Status: common.ChannelStatusEnabled, Models: "shared-route-model", Group: "default", Priority: &priority, AutoBan: &autoBan}
+		channel.SetSetting(dto.ChannelSettings{TaskPluginKey: key})
+		require.NoError(t, channel.Insert())
+		channels[key] = channel.Id
+	}
+	require.NoError(t, registry.ReplaceOverrides(plugins))
+	outer := newOuterPluginTestEngine()
+	SetTaskPluginProtocolRouter(outer)
+	outer.NoRoute(SetPluginRouter(outer))
+	for _, tc := range []struct {
+		name, path, prompt, credential string
+		status                         int
+		providers                      []string
+		operation, selected            string
+	}{
+		{"standard retry", "/v1/videos", "retry", token.Key, 200, []string{"provider-a", "provider-b"}, "create", "provider-b"},
+		{"edit retry", "/v1/videos/video-edit", "retry", token.Key, 200, []string{"provider-a", "provider-b"}, "video-edit", "provider-b"},
+		{"extend priority", "/v1/videos/video-extend", "first-success", token.Key, 200, []string{"provider-a"}, "video-extend", "provider-a"},
+		{"decoder fallback", "/v1/videos/video-edit", "reject-first", token.Key, 200, []string{"provider-b"}, "video-edit", "provider-b"},
+		{"no accepting provider", "/v1/videos/video-edit", "reject-all", token.Key, 400, nil, "", ""},
+		{"authentication", "/v1/videos/video-edit", "retry", "", 401, nil, "", ""},
+		{"invalid credential", "/v1/videos/video-edit", "retry", "invalidfixture", 401, nil, "", ""},
+		{"expired credential", "/v1/videos/video-edit", "retry", expired.Key, 401, nil, "", ""},
+		{"model permissions", "/v1/videos/video-edit", "retry", limited.Key, 403, nil, "", ""},
+		{"invalid body", "/v1/videos/video-edit", "", token.Key, 400, nil, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callsMu.Lock()
+			calls = nil
+			callsMu.Unlock()
+			body := fmt.Sprintf(`{"model":"shared-route-model","prompt":%q}`, tc.prompt)
+			if tc.name == "invalid body" {
+				body = "{"
+			}
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			if tc.credential != "" {
+				request.Header.Set("Authorization", "Bearer sk-"+tc.credential)
+			}
+			recorder := httptest.NewRecorder()
+			outer.ServeHTTP(recorder, request)
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			callsMu.Lock()
+			assert.Equal(t, tc.providers, calls)
+			callsMu.Unlock()
+			if tc.status != http.StatusOK {
+				return
+			}
+			var receipt map[string]any
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &receipt))
+			assert.Equal(t, "video", receipt["object"])
+			assert.Equal(t, "shared-route-model", receipt["model"])
+			var task model.Task
+			require.NoError(t, database.Where("task_id = ?", receipt["id"]).First(&task).Error)
+			assert.Equal(t, channels[tc.selected], task.ChannelId)
+			assert.Equal(t, constant.TaskPlatform(tc.selected), task.Platform)
+			assert.Equal(t, tc.operation, task.Action)
+			assert.Equal(t, 5000, task.Quota)
+			assert.NotContains(t, recorder.Body.String(), "upstream-")
+			query := httptest.NewRequest(http.MethodGet, "/v1/videos/"+receipt["id"].(string), nil)
+			query.Header.Set("Authorization", "Bearer sk-"+token.Key)
+			queryRecorder := httptest.NewRecorder()
+			outer.ServeHTTP(queryRecorder, query)
+			require.Equal(t, http.StatusOK, queryRecorder.Code, queryRecorder.Body.String())
+			var retrieved map[string]any
+			require.NoError(t, common.Unmarshal(queryRecorder.Body.Bytes(), &retrieved))
+			assert.Equal(t, receipt["id"], retrieved["id"])
+			assert.Equal(t, tc.selected, retrieved["provider"])
+		})
+	}
+	// Multipart is inherited as well as JSON; failed first attempts reuse the body.
+	callsMu.Lock()
+	calls = nil
+	callsMu.Unlock()
+	var form bytes.Buffer
+	writer := multipart.NewWriter(&form)
+	require.NoError(t, writer.WriteField("model", "shared-route-model"))
+	require.NoError(t, writer.WriteField("prompt", "retry"))
+	require.NoError(t, writer.Close())
+	request := httptest.NewRequest(http.MethodPost, "/v1/videos/video-edit", &form)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Authorization", "Bearer sk-"+token.Key)
+	recorder := httptest.NewRecorder()
+	outer.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	callsMu.Lock()
+	assert.Equal(t, []string{"provider-a", "provider-b"}, calls)
+	callsMu.Unlock()
+	var chargedUser model.User
+	require.NoError(t, database.First(&chargedUser, user.Id).Error)
+	assert.Equal(t, 975_000, chargedUser.Quota) // Five accepted tasks, one charge each despite retries.
+	var chargedToken model.Token
+	require.NoError(t, database.First(&chargedToken, token.Id).Error)
+	assert.Equal(t, 975_000, chargedToken.RemainQuota)
+
+	// A model not claimed by any plugin keeps the ordinary Go adaptor and
+	// its standard retry path, with the inherited URL sent upstream.
+	imageSource := strings.ReplaceAll(sharedVideoPluginSource("image-provider", `[{method:"POST",path:"/v1/images/custom-generation",operation:"custom-generation",extends:"generate"}]`), "openai_video", "openai_image")
+	imagePlugin, err := jsplugin.CompilePlugin(imageSource, jsplugin.Options{Key: "image-provider", Version: "1.0.0"})
+	require.NoError(t, err)
+	require.NoError(t, registry.ReplaceOverrides(append(plugins, imagePlugin)))
+	goUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provider := r.Header.Get("Authorization")
+		callsMu.Lock()
+		calls = append(calls, provider)
+		callsMu.Unlock()
+		assert.Equal(t, "/v1/images/generations", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if provider == "Bearer go-a" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"retry","type":"server_error"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"created":1710000000,"data":[{"url":"https://cdn.example/image.png"}]}`)
+	}))
+	defer goUpstream.Close()
+	for index, key := range []string{"go-a", "go-b"} {
+		priority, autoBan := int64(10-index*10), 0
+		channel := model.Channel{Type: constant.ChannelTypeOpenAI, Name: key, Key: key, BaseURL: &goUpstream.URL, Status: common.ChannelStatusEnabled, Models: "unclaimed-image", Group: "default", Priority: &priority, AutoBan: &autoBan}
+		require.NoError(t, channel.Insert())
+	}
+	for _, path := range []string{"/v1/images/generations", "/v1/images/custom-generation"} {
+		callsMu.Lock()
+		calls = nil
+		callsMu.Unlock()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"unclaimed-image","prompt":"lighthouse","n":1}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer sk-"+token.Key)
+		recorder := httptest.NewRecorder()
+		outer.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), "https://cdn.example/image.png")
+		callsMu.Lock()
+		assert.Equal(t, []string{"Bearer go-a", "Bearer go-b"}, calls)
+		callsMu.Unlock()
+	}
+}
+
+func TestSharedProtocolRouteRejectsAmbiguousAndProtectedURLs(t *testing.T) {
+	for _, tc := range []struct{ name, route string }{
+		{"reserved", `{method:"POST",path:"/api/private",operation:"edit",extends:"create"}`},
+		{"wildcard", `{method:"POST",path:"/v1/videos/:id/edit",operation:"edit",extends:"create"}`},
+		{"retrieval parent", `{method:"POST",path:"/v1/videos/edit",operation:"edit",extends:"retrieve"}`},
+		{"method mismatch", `{method:"GET",path:"/v1/videos/edit",operation:"edit",extends:"create"}`},
+		{"unknown property", `{method:"POST",path:"/v1/videos/edit",operation:"edit",extends:"create",auth:"none"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := jsplugin.CompilePlugin(sharedVideoPluginSource("provider-a", "["+tc.route+"]"), jsplugin.Options{Key: "provider-a", Version: "1.0.0"})
+			require.Error(t, err)
+		})
+	}
+	first, err := jsplugin.CompilePlugin(sharedVideoPluginSource("provider-a", `[{method:"POST",path:"/v1/videos/edit",operation:"edit",extends:"create"}]`), jsplugin.Options{Key: "provider-a", Version: "1.0.0"})
+	require.NoError(t, err)
+	second, err := jsplugin.CompilePlugin(sharedVideoPluginSource("provider-b", `[{method:"POST",path:"/v1/videos/edit",operation:"extend",extends:"create"}]`), jsplugin.Options{Key: "provider-b", Version: "1.0.0"})
+	require.NoError(t, err)
+	registry := jsplugin.NewRegistry()
+	require.NoError(t, registry.ReplaceOverrides([]*jsplugin.LoadedPlugin{first}))
+	require.NoError(t, registry.ReplaceOverrides([]*jsplugin.LoadedPlugin{first, second}))
+	retained, accepted := registry.Generation().Get("provider-a")
+	require.True(t, accepted)
+	assert.Same(t, first, retained)
+	_, accepted = registry.Generation().Get("provider-b")
+	assert.False(t, accepted)
+	assert.Contains(t, registry.RoutingErrors()["provider-b"], "incompatible declarations")
+
+	outer := gin.New()
+	outer.POST("/v1/videos/edit", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	builder := newPluginGenerationBuilder(outer.Routes(), nil, productionPluginRouteHandlers)
+	require.NoError(t, registry.SetGenerationPreparer(builder.prepare))
+	_, accepted = registry.Generation().Get("provider-a")
+	assert.False(t, accepted, "a plugin must not replace a static route")
 }

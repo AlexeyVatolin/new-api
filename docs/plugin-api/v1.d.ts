@@ -35,12 +35,14 @@ export type TaskIntent = SubmitIntent | QueryIntent;
 export interface NativeRoute {method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; type: "submit" | "query" | "dynamic"; action?: string; taskIdParam?: string; decode?: string; render: string; models?: readonly string[]; retainResult?: boolean}
 export type ProtocolName = "openai_responses" | "openai_video" | "openai_image";
 export type ResponsesMode = "stream" | "sync" | "background";
+/** A shared submission URL inheriting a host operation's routing and relay policy. */
+export interface ProtocolRoute {method: "POST"; path: string; operation: string; extends: "create" | "generate" | "edit"}
 export type ProtocolClaim =
   | "openai_video"
   | "openai_image"
-  | {name: "openai_responses"; supports: readonly ResponsesMode[]; models?: readonly string[]}
-  | {name: "openai_video"; models?: readonly string[]}
-  | {name: "openai_image"; models?: readonly string[]};
+  | {name: "openai_responses"; supports: readonly ResponsesMode[]; models?: readonly string[]; routes?: readonly (ProtocolRoute & {extends: "create"})[]}
+  | {name: "openai_video"; models?: readonly string[]; routes?: readonly (ProtocolRoute & {extends: "create"})[]}
+  | {name: "openai_image"; models?: readonly string[]; routes?: readonly (ProtocolRoute & {extends: "generate" | "edit"})[]};
 /** One entry of the OpenAI ImageResponse `data` array rendered by protocols.openai_image.render. */
 export type ImageResponseEntry = {url?: string; b64_json?: string; revised_prompt?: string};
 export type LocalizedText = string | ({ en: string } & Record<string, string>);

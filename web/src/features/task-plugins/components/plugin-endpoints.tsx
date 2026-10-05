@@ -100,7 +100,15 @@ export function PluginEndpoints(props: {
         const name = typeof claim === 'string' ? claim : claim.name
         const supports = typeof claim === 'string' ? undefined : claim.supports
         const models = typeof claim === 'string' ? undefined : claim.models
-        const endpoints = HOST_PROTOCOL_ENDPOINTS[name] ?? []
+        const additional = typeof claim === 'string' ? [] : (claim.routes ?? [])
+        const endpoints = [
+          ...(HOST_PROTOCOL_ENDPOINTS[name] ?? []),
+          ...additional.map((route) => ({
+            method: route.method,
+            path: route.path,
+            modeBearing: name === 'openai_responses',
+          })),
+        ]
         const modeLabels = {
           stream: t('Streaming'),
           sync: t('Synchronous'),

@@ -35,6 +35,17 @@ var errTaskPluginUnsupportedMediaType = errors.New("unsupported task plugin medi
 
 const taskPluginInvalidRouteResult = "plugin returned an invalid route result"
 
+// Inherited operations use their parent's path-dependent middleware policies;
+// the request URL remains available to the plugin's decoder unchanged.
+func inheritedTaskPluginPath(c *gin.Context) string {
+	if value, exists := c.Get(pluginruntime.ContextKeyProtocolRoute); exists {
+		if route, ok := value.(pluginruntime.PinnedProtocolRoute); ok {
+			return route.Operation.BasePath
+		}
+	}
+	return c.Request.URL.Path
+}
+
 const (
 	maxTaskPluginFormFields      = 256
 	maxTaskPluginMultipartParts  = 256
@@ -318,6 +329,11 @@ func PrepareTaskPluginRoute() gin.HandlerFunc {
 func PinTaskPluginEndpoint() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		generation := pluginruntime.DefaultRegistry.Generation()
+		if value, exists := c.Get(pluginruntime.ContextKeyProtocolRoute); exists {
+			if route, ok := value.(pluginruntime.PinnedProtocolRoute); ok {
+				generation = route.Generation
+			}
+		}
 		if generation == nil {
 			c.Next()
 			return
@@ -325,7 +341,7 @@ func PinTaskPluginEndpoint() gin.HandlerFunc {
 
 		modelRequest, err := getModelFromRequest(c)
 		if err != nil {
-			if _, _, protocolPath := pluginruntime.LookupHostProtocolOperation(c.Request.Method, c.Request.URL.Path); protocolPath {
+			if _, _, protocolPath := generation.LookupProtocolOperation(c.Request.Method, c.Request.URL.Path); protocolPath {
 				abortWithOpenAiMessage(c, http.StatusBadRequest, "Invalid task protocol request")
 				return
 			}

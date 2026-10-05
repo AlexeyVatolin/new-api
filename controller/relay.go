@@ -748,7 +748,7 @@ func presentTaskSubmission(c *gin.Context, outcome *taskSubmissionOutcome) {
 		}
 	}
 	if pinnedValue, exists := c.Get(pluginruntime.ContextKeyPinnedEndpoint); exists {
-		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok && pinned.Protocol == "openai_video" && pinned.Operation.Name == "create" {
+		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok && pinned.Protocol == "openai_video" && (pinned.Operation.Name == "create" || pinned.Operation.BaseOperation == "create") {
 			diagnostics.present(outcome.Task, "openai_video_create")
 			c.JSON(http.StatusOK, outcome.Task.ToOpenAIVideo())
 			return

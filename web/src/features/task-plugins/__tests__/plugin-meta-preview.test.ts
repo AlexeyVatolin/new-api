@@ -49,6 +49,25 @@ const plugin: MarketplacePlugin = {
   channelTypes: [61],
 }
 
+test('preserves additional shared protocol routes in source metadata preview', () => {
+  const routes = [
+    {
+      method: 'POST',
+      path: '/v1/videos/video-edit',
+      operation: 'video-edit',
+      extends: 'create',
+    },
+  ]
+  const preview = parsePluginMetaPreview(
+    `export const meta = {protocols: [{name: "openai_video", routes: ${JSON.stringify(routes)}}]};`
+  )
+  expect(preview.fields.protocols).toEqual({
+    state: 'value',
+    origin: 'source',
+    value: [{ name: 'openai_video', routes }],
+  })
+})
+
 test('reads the selected Incho models, protocols and both native routes without requiring runtime hooks', () => {
   const preview = parsePluginMetaPreview(inchoMeta)
   expect(preview.status).toBe('parsed')

@@ -229,6 +229,33 @@ describe('PluginDetailSheet host protocol endpoints', () => {
 })
 
 describe('PluginDetailSheet native routes', () => {
+  test('an additional shared video endpoint is displayed and can be copied', async () => {
+    const user = userEvent.setup()
+    renderSheet({
+      protocols: [
+        {
+          name: 'openai_video',
+          routes: [
+            {
+              method: 'POST',
+              path: '/v1/videos/video-edit',
+              operation: 'video-edit',
+              extends: 'create',
+            },
+          ],
+        },
+      ],
+    })
+    await screen.findByText('/v1/videos/video-edit')
+    const row = endpointRow('/v1/videos/video-edit')
+    expect(within(row).getByText('POST')).toBeVisible()
+    expect(within(row).getByText('Submit request')).toBeVisible()
+    await user.click(
+      within(row).getByRole('button', { name: 'Copy endpoint path' })
+    )
+    expect(await navigator.clipboard.readText()).toBe('/v1/videos/video-edit')
+  })
+
   test('given declared native routes, each renders its method, path and type', async () => {
     renderSheet({
       routes: [

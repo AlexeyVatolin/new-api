@@ -31,7 +31,9 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 			middleware.RouteTag("relay"), middleware.SystemPerformanceCheck(), middleware.TokenAuth(),
 			middleware.ModelRequestRateLimit(), middleware.PinTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
 			func(c *gin.Context) {
-				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) { controller.Relay(c, types.RelayFormatOpenAIResponses) })
+				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) {
+					canonicalProtocolFallback(c, func(c *gin.Context) { controller.Relay(c, types.RelayFormatOpenAIResponses) })
+				})
 			},
 		}, nil
 	case "openai_image.generate", "openai_image.edit":
@@ -39,14 +41,18 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 			middleware.RouteTag("relay"), middleware.SystemPerformanceCheck(), middleware.TokenAuth(),
 			middleware.ModelRequestRateLimit(), middleware.PinTaskPluginEndpoint(), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
 			func(c *gin.Context) {
-				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) { controller.Relay(c, types.RelayFormatOpenAIImage) })
+				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) {
+					canonicalProtocolFallback(c, func(c *gin.Context) { controller.Relay(c, types.RelayFormatOpenAIImage) })
+				})
 			},
 		}, nil
 	case "openai_video.create":
 		return []gin.HandlerFunc{
 			middleware.RouteTag("relay"), middleware.TokenAuth(), middleware.SystemPerformanceCheck(),
 			middleware.PinTaskPluginEndpoint(), middleware.TaskPluginEndpointOnly(middleware.ModelRequestRateLimit()), middleware.PrepareTaskPluginEndpoint(), middleware.Distribute(),
-			func(c *gin.Context) { controller.RelayTaskPluginEndpoint(c, controller.RelayTask) },
+			func(c *gin.Context) {
+				controller.RelayTaskPluginEndpoint(c, func(c *gin.Context) { canonicalProtocolFallback(c, controller.RelayTask) })
+			},
 		}, nil
 	case "openai_responses.retrieve":
 		return []gin.HandlerFunc{middleware.RouteTag("relay"), middleware.TokenAuth(), controller.RetrieveTaskPluginResponse}, nil
@@ -57,4 +63,23 @@ func taskPluginProtocolHandlers(protocol, operation string) ([]gin.HandlerFunc, 
 	default:
 		return nil, fmt.Errorf("host protocol registry operation %s.%s has no handler", protocol, operation)
 	}
+}
+
+// Ordinary Go adaptors see the inherited endpoint; plugin decoders and drivers
+// keep the declared URL and operation. Both paths use the usual relay policy.
+func canonicalProtocolFallback(c *gin.Context, fallback gin.HandlerFunc) {
+	value, exists := c.Get(pluginruntime.ContextKeyProtocolRoute)
+	route, ok := value.(pluginruntime.PinnedProtocolRoute)
+	_, claimed := c.Get(pluginruntime.ContextKeyPinnedEndpoint)
+	if !exists || !ok || claimed {
+		fallback(c)
+		return
+	}
+	original := c.Request
+	request := original.Clone(original.Context())
+	request.URL.Path, request.URL.RawPath = route.Operation.BasePath, ""
+	request.RequestURI = request.URL.RequestURI()
+	c.Request = request
+	defer func() { c.Request = original }()
+	fallback(c)
 }
