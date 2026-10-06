@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/andybalholm/brotli"
@@ -25,7 +26,7 @@ func (rc *readCloser) Close() error {
 
 func DecompressRequestMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Body == nil || c.Request.Method == http.MethodGet {
+		if strings.HasPrefix(c.Request.URL.Path, "/raw/") || c.Request.Body == nil || c.Request.Method == http.MethodGet {
 			c.Next()
 			return
 		}

@@ -366,6 +366,7 @@ var (
 )
 
 var reservedRouteNamespaces = []string{
+	"/raw",
 	"/api",
 	"/assets",
 	"/setup",
@@ -904,8 +905,15 @@ func buildRoutingGenerationFromPlugins(effective map[string]*LoadedPlugin, numbe
 		protocolIndex:        make(map[string][]ProtocolBinding),
 		plugins:              make([]*LoadedPlugin, 0, len(effective)),
 	}
+	rawNames := make(map[string]string)
 	for _, key := range keys {
 		plugin := effective[key]
+		for _, route := range plugin.Meta.RawRoutes {
+			if other, exists := rawNames[route.Name]; exists {
+				return nil, fmt.Errorf("plugin %s raw route %s conflicts with plugin %s", key, route.Name, other)
+			}
+			rawNames[route.Name] = key
+		}
 		generation.byKey[key] = plugin
 		generation.plugins = append(generation.plugins, plugin)
 		for _, model := range plugin.Meta.Models {

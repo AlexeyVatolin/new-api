@@ -577,6 +577,12 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	}
 
 	setting := channel.GetSetting()
+	if setting.RawProxyEnabled {
+		plugin, ok := jsplugin.DefaultRegistry.Get(setting.TaskPluginKey)
+		if channel.Type != constant.ChannelTypeTaskPlugin || !ok || len(plugin.Meta.RawRoutes) == 0 {
+			return fmt.Errorf("raw proxy requires a Task Plugin channel with rawRoutes")
+		}
+	}
 	if channel.Type != constant.ChannelTypeNewAPI && len(setting.TaskExtendPluginKeys) > 0 {
 		return fmt.Errorf("task_extend_plugin_keys is only supported on New API channels")
 	}

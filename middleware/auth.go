@@ -526,7 +526,7 @@ func TokenAuth() func(c *gin.Context) {
 		// 先检测是否为ws
 		applyWebSocketSubprotocolAuthorization(c.Request.Header)
 		// 检查path包含/v1/messages 或 /v1/models
-		if strings.Contains(c.Request.URL.Path, "/v1/messages") || strings.Contains(c.Request.URL.Path, "/v1/models") {
+		if !strings.HasPrefix(c.Request.URL.Path, "/raw/") && (strings.Contains(c.Request.URL.Path, "/v1/messages") || strings.Contains(c.Request.URL.Path, "/v1/models")) {
 			anthropicKey := c.Request.Header.Get("x-api-key")
 			if anthropicKey != "" {
 				c.Request.Header.Set("Authorization", "Bearer "+anthropicKey)
@@ -565,7 +565,11 @@ func TokenAuth() func(c *gin.Context) {
 			parts = strings.Split(key, "-")
 			key = parts[0]
 		}
-		token, err := model.ValidateUserToken(key)
+		validateToken := model.ValidateUserToken
+		if strings.HasPrefix(c.Request.URL.Path, "/raw/") {
+			validateToken = model.ValidateRawUserToken
+		}
+		token, err := validateToken(key)
 		if token != nil {
 			id := c.GetInt("id")
 			if id == 0 {

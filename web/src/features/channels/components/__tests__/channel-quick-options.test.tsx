@@ -309,3 +309,34 @@ describe('responses websocket quick option', () => {
     }
   )
 })
+
+describe('raw proxy channel option', () => {
+  test('enables raw proxy on a task plugin channel and saves the choice', async () => {
+    const user = userEvent.setup()
+    const saved: ChannelFormValues[] = []
+    render(
+      <QuickOptionsHarness
+        channelType={CHANNEL_TYPE_TASK_PLUGIN}
+        confirm={() => Promise.resolve(true)}
+        onSave={(values) => saved.push(values)}
+      />
+    )
+    const toggle = screen.getByRole('switch', { name: 'Raw proxy' })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0].raw_proxy_enabled).toBe(true)
+  })
+  test('does not offer raw proxy on a built-in channel', () => {
+    render(
+      <QuickOptionsHarness
+        channelType={1}
+        confirm={() => Promise.resolve(true)}
+      />
+    )
+    expect(
+      screen.queryByRole('switch', { name: 'Raw proxy' })
+    ).not.toBeInTheDocument()
+  })
+})

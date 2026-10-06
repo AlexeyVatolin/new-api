@@ -207,6 +207,7 @@ export const channelFormSchema = z
     name: z.string().min(1, ERROR_MESSAGES.REQUIRED_NAME),
     type: z.number().min(0, ERROR_MESSAGES.REQUIRED_TYPE),
     base_url: z.string().optional(),
+    raw_proxy_enabled: z.boolean().optional(),
     task_plugin_key: z.string().optional(),
     task_extend_plugin_keys: z.array(z.string()).optional(),
     key: z.string(),
@@ -430,6 +431,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   name: '',
   type: 1,
   base_url: '',
+  raw_proxy_enabled: false,
   task_plugin_key: '',
   task_extend_plugin_keys: [],
   key: '',
@@ -497,6 +499,7 @@ export function transformChannelToFormDefaults(
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
   let extraSettings = {
+    raw_proxy_enabled: false,
     task_plugin_key: '',
     task_extend_plugin_keys: [] as string[],
     force_format: false,
@@ -518,6 +521,7 @@ export function transformChannelToFormDefaults(
         parsed.http2_connection_shards
       )
       extraSettings = {
+        raw_proxy_enabled: parsed.raw_proxy_enabled === true,
         task_plugin_key: parsed.task_plugin_key || '',
         task_extend_plugin_keys: readTaskExtendPluginKeys(channel.type, parsed),
         force_format: parsed.force_format || false,
@@ -644,6 +648,9 @@ export function transformChannelToFormDefaults(
  */
 export function buildSettingJSON(formData: ChannelFormValues): string {
   const settingObj: Record<string, unknown> = {
+    raw_proxy_enabled:
+      formData.type === CHANNEL_TYPE_TASK_PLUGIN &&
+      formData.raw_proxy_enabled === true,
     task_plugin_key:
       formData.type === CHANNEL_TYPE_TASK_PLUGIN
         ? formData.task_plugin_key?.trim() || ''

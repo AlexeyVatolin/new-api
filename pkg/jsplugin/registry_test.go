@@ -1268,3 +1268,35 @@ func TestSubmitResponseTypesContract(t *testing.T) {
 		})
 	}
 }
+
+func TestRawRouteNamesAndTargets(t *testing.T) {
+	for _, test := range []struct {
+		name, base string
+		valid      bool
+	}{{"falai", "https://fal.run", true}, {"bad/name", "https://fal.run", false}, {"falai", "https://user:pass@fal.run", false}, {"falai", "https://fal.run/path", false}, {"falai", "https://fal.run?x=1", false}} {
+		t.Run(test.name+test.base, func(t *testing.T) {
+			routes, err := decodeRawRoutes([]any{map[string]any{"name": test.name, "baseUrl": test.base}})
+			if !test.valid {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			target, err := RawTarget(routes[0], "/raw/falai/a%2Fb//c", "x=%2F&x=2", false)
+			require.NoError(t, err)
+			assert.Equal(t, "https://fal.run/a%2Fb//c?x=%2F&x=2", target.String())
+			_, err = RawTarget(routes[0], "/raw/falai%2F/a", "", false)
+			assert.Error(t, err)
+		})
+	}
+	registry := NewRegistry()
+	source := `export const meta={apiVersion:1,key:"raw-a",name:"Raw",version:"1.0.0",author:{name:"Tests"},models:["test"],fetchMode:"per_task",rawRoutes:[{name:"shared",baseUrl:"https://vendor.example"}]}; export function buildSubmitRequest(){} export function parseSubmitResponse(){} export function parseTaskResult(){} export function buildQueryRequest(){} export function describeRawRequest(){} export function extractRawCost(){}`
+	first, err := registry.Register(source, Options{})
+	require.NoError(t, err)
+	second, err := CompilePlugin(strings.ReplaceAll(source, "raw-a", "raw-b"), Options{})
+	require.NoError(t, err)
+	assert.Error(t, PreflightRoutingConflict(registry.Generation(), second))
+	plugin, route, found := registry.Generation().LookupRawRoute("shared")
+	require.True(t, found)
+	assert.Equal(t, first, plugin)
+	assert.Equal(t, "https://vendor.example", route.BaseURL)
+}

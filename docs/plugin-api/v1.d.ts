@@ -51,7 +51,7 @@ export type UsageFieldSchema =
   | {enum: readonly string[]; unitLabel?: never; description?: LocalizedText; enumLabels?: Readonly<Record<string, LocalizedText>>};
 export type UsageExample = {label: string; facts: Readonly<Record<string, string | number | boolean>>};
 export type UsageProfile = {models: readonly string[]; schema: Readonly<Record<string, UsageFieldSchema>>; examples?: readonly UsageExample[]};
-export interface Meta {requiredCapabilities?: readonly HostCapability[]; submitResponseTypes?: readonly ("json" | "sse")[]; sortPriority?: number; website?: string; apiVersion: 1; key: string; name: string; icon?: string; description?: LocalizedText; version: string; author: {name: string; url?: string}; baseUrl?: string; channelTypes?: readonly number[]; models: readonly string[]; fetchMode: "per_task" | "batch"; allowedHosts?: readonly string[]; upstreams?: readonly UpstreamKind[]; routes?: readonly NativeRoute[]; protocols?: readonly ProtocolClaim[]; usageSchema?: Readonly<Record<string, UsageFieldSchema>>; usageExamples?: readonly UsageExample[]; usageProfiles?: readonly UsageProfile[]; auth?: "none" | "api_key" | "vertex_oauth" | {type: "none" | "api_key" | "oauth2_jwt"}}
+export interface Meta {rawRoutes?: readonly RawRoute[]; requiredCapabilities?: readonly HostCapability[]; submitResponseTypes?: readonly ("json" | "sse")[]; sortPriority?: number; website?: string; apiVersion: 1; key: string; name: string; icon?: string; description?: LocalizedText; version: string; author: {name: string; url?: string}; baseUrl?: string; channelTypes?: readonly number[]; models: readonly string[]; fetchMode: "per_task" | "batch"; allowedHosts?: readonly string[]; upstreams?: readonly UpstreamKind[]; routes?: readonly NativeRoute[]; protocols?: readonly ProtocolClaim[]; usageSchema?: Readonly<Record<string, UsageFieldSchema>>; usageExamples?: readonly UsageExample[]; usageProfiles?: readonly UsageProfile[]; auth?: "none" | "api_key" | "vertex_oauth" | {type: "none" | "api_key" | "oauth2_jwt"}}
 export interface TaskView {task_id: string; status: string; progress?: string; fail_reason?: string; created_at?: number; updated_at?: number; data?: unknown; properties?: Record<string, unknown>}
 export interface DriverContext {requestBody: unknown; requestHeaders: Readonly<Record<string, string>>; action: string; model: string; upstreamModel: string; baseUrl: string; apiKey?: string; authHeader: string; upstream: UpstreamContext; files: readonly FileReference[]; publicTaskId: string; originTasks?: readonly {taskId: string; upstreamTaskId: string; action: string; status: string; data: unknown}[]}
 export interface TaskQueryContext {taskId: string; publicTaskId: string; action: string; model: string; upstreamModel: string; baseUrl: string; apiKey?: string; authHeader: string; auth?: unknown; upstream: UpstreamContext; data: unknown; state: unknown}
@@ -89,3 +89,18 @@ export declare function extractUsageOnSubmit(ctx: DriverContext, taskData: unkno
 export declare function extractUsageOnComplete(task: TaskQueryContext, result: NormalizedTaskResult, data: unknown): Readonly<Record<string, string | number | boolean>> | null;
 export declare function listArtifacts(task: {taskId: string; status: string; action: string; data: unknown; producerVersion: string}): readonly TaskArtifact[];
 export declare function buildContentRequest(ctx: DriverContext & {artifactKey: string; data: unknown; state?: unknown; upstreamTaskId: string; clientRequest: {method: "GET" | "HEAD"; headers: Readonly<Record<string, string>>}}): RequestDescriptor;
+
+/** Raw routes are a third, independent surface; no task driver normalization is run. */
+export interface RawRoute {name: string; baseUrl: string}
+export interface RawRequest {method: string; path: string; query: string; headers: Readonly<Record<string, readonly string[]>>; bodyBase64: string}
+export interface RawContext {routeName: string; baseUrl: string; apiKey?: string; model?: string; operation?: "submit" | "query" | "cancel" | "other"; requestId?: string; path?: string}
+export interface RawDescription {model: string; operation: "submit" | "query" | "cancel" | "other"; requestId?: string}
+export interface RawRequestChanges {headers?: Record<string, readonly string[]>; bodyBase64?: string}
+export interface RawResponse {statusCode: number; headers: Readonly<Record<string, readonly string[]>>; bodyText: string; bodyTruncated?: boolean}
+export interface RawCost {requestId?: string; costUSD?: number; costRequest?: {method: "GET"; url: string; headers?: Record<string, readonly string[]>}}
+/** Required for meta.rawRoutes. Called before channel selection; no apiKey. */
+export type DescribeRawRequest = (ctx: RawContext, request: RawRequest) => RawDescription;
+/** Optional; omission is a no-op. Only explicitly returned fields replace the request. */
+export type PrepareRawRequest = (ctx: RawContext, request: RawRequest) => RawRequestChanges;
+/** Required for meta.rawRoutes. A costRequest leads to one second call with its response. */
+export type ExtractRawCost = (ctx: RawContext, response: RawResponse, costResponse?: RawResponse) => RawCost;

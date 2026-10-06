@@ -80,6 +80,7 @@ export type Channel = z.infer<typeof channelSchema>
 // ============================================================================
 
 export interface ChannelSettings {
+  raw_proxy_enabled?: boolean
   task_plugin_key?: string
   task_extend_plugin_keys?: string[]
   force_format?: boolean

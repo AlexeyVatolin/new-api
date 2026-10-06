@@ -69,23 +69,31 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
   const id = useId()
   const formContext = useFormContext<ChannelFormValues>()
   const form = props.form ?? formContext
-  const [passthrough, headerOverride, autoBan, modelCheck, websocket] =
-    useWatch({
-      control: form.control,
-      name: [
-        'pass_through_body_enabled',
-        'header_override',
-        'auto_ban',
-        'upstream_model_update_check_enabled',
-        'responses_websocket_enabled',
-      ],
-    })
+  const [
+    passthrough,
+    headerOverride,
+    autoBan,
+    modelCheck,
+    websocket,
+    rawProxy,
+  ] = useWatch({
+    control: form.control,
+    name: [
+      'pass_through_body_enabled',
+      'header_override',
+      'auto_ban',
+      'upstream_model_update_check_enabled',
+      'responses_websocket_enabled',
+      'raw_proxy_enabled',
+    ],
+  })
   const sensitiveDisabled = props.sensitiveLocked || props.disabled
   const setOption = (
     name:
       | 'pass_through_body_enabled'
       | 'upstream_model_update_check_enabled'
-      | 'responses_websocket_enabled',
+      | 'responses_websocket_enabled'
+      | 'raw_proxy_enabled',
     value: boolean
   ) => form.setValue(name, value, { shouldDirty: true, shouldValidate: true })
   // The header switch is a shortcut for the "*" rule in Request Header
@@ -99,6 +107,18 @@ export function ChannelQuickOptions(props: ChannelQuickOptionsProps) {
     )
 
   const options: QuickOption[] = []
+  if (props.channelType === CHANNEL_TYPE_TASK_PLUGIN) {
+    options.push({
+      key: 'raw-proxy',
+      label: t('Raw proxy'),
+      description: t(
+        'Forward provider requests through the raw routes declared by the plugin'
+      ),
+      checked: rawProxy === true,
+      onCheckedChange: (value) => setOption('raw_proxy_enabled', value),
+      disabled: sensitiveDisabled,
+    })
+  }
   if (props.channelType !== CHANNEL_TYPE_TASK_PLUGIN) {
     options.push({
       key: 'passthrough',

@@ -6863,6 +6863,8 @@
     "Zhipu": "智谱",
     "Zhipu GLM": "智谱GLM",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "Raw proxy": "原始代理",
+    "Forward provider requests through the raw routes declared by the plugin": "通过插件声明的 raw 路由转发提供商请求"
   }
 }

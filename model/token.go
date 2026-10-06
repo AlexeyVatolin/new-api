@@ -217,15 +217,28 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 	return tokens, total, nil
 }
 
-func ValidateUserToken(key string) (token *Token, err error) {
+func ValidateUserToken(key string) (*Token, error) {
+	return validateUserToken(key, false)
+}
+
+// Raw task access keeps expiry/status checks but postpones balance checks until
+// the plugin identifies a new submission. Existing results remain accessible.
+func ValidateRawUserToken(key string) (*Token, error) {
+	return validateUserToken(key, true)
+}
+
+func validateUserToken(key string, raw bool) (token *Token, err error) {
 	if key == "" {
 		return nil, ErrTokenNotProvided
 	}
-	token, err = GetTokenByKey(key, false)
+	if raw {
+		token = &Token{}
+		err = DB.Where(map[string]any{"key": key}).First(token).Error
+	} else {
+		token, err = GetTokenByKey(key, false)
+	}
 	if err == nil {
-		if token.Status == common.TokenStatusExhausted ||
-			token.Status == common.TokenStatusExpired ||
-			token.Status != common.TokenStatusEnabled {
+		if token.Status != common.TokenStatusEnabled && !(raw && token.Status == common.TokenStatusExhausted) {
 			return token, ErrTokenInvalid
 		}
 		if token.ExpiredTime != -1 && token.ExpiredTime < common.GetTimestamp() {
@@ -238,7 +251,7 @@ func ValidateUserToken(key string) (token *Token, err error) {
 			}
 			return token, ErrTokenInvalid
 		}
-		if !token.UnlimitedQuota && token.RemainQuota <= 0 {
+		if !raw && !token.UnlimitedQuota && token.RemainQuota <= 0 {
 			if !common.RedisEnabled {
 				token.Status = common.TokenStatusExhausted
 				err := token.SelectUpdate()

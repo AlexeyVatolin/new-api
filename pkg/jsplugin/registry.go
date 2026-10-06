@@ -84,6 +84,7 @@ func (t *LocalizedText) UnmarshalJSON(data []byte) error {
 }
 
 type Meta struct {
+	RawRoutes            []RawRoute                  `json:"rawRoutes,omitempty"`
 	RequiredCapabilities []string                    `json:"requiredCapabilities,omitempty"`
 	SubmitResponseTypes  []string                    `json:"submitResponseTypes,omitempty"`
 	SortPriority         int                         `json:"sortPriority,omitempty"`
@@ -322,6 +323,9 @@ func CompilePlugin(source string, options Options) (*LoadedPlugin, error) {
 	engine.key = meta.Key
 	engine.version = meta.Version
 	requiredHooks := []string{"buildSubmitRequest", "parseSubmitResponse", "parseTaskResult"}
+	if len(meta.RawRoutes) > 0 {
+		requiredHooks = append(requiredHooks, "describeRawRequest", "extractRawCost")
+	}
 	if slices.Contains(meta.SubmitResponseTypes, "sse") {
 		if slices.Contains(meta.RequiredCapabilities, CapabilitySubmitSSEDelta) {
 			requiredHooks = append(requiredHooks, "parseSubmitEventDelta")
@@ -854,6 +858,7 @@ func cloneMeta(meta Meta) Meta {
 	meta.Models = append([]string(nil), meta.Models...)
 	meta.AllowedHosts = append([]string(nil), meta.AllowedHosts...)
 	meta.Upstreams = slices.Clone(meta.Upstreams)
+	meta.RawRoutes = slices.Clone(meta.RawRoutes)
 	meta.Routes = append([]Route(nil), meta.Routes...)
 	for index := range meta.Routes {
 		meta.Routes[index].Models = append([]string(nil), meta.Routes[index].Models...)
@@ -995,7 +1000,7 @@ func decodeMeta(value any) (Meta, error) {
 	}
 	for field := range object {
 		switch field {
-		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions":
+		case "requiredCapabilities", "submitResponseTypes", "sortPriority", "website", "apiVersion", "key", "name", "icon", "description", "version", "author", "baseUrl", "channelTypes", "channelType", "compatibleChannelTypes", "models", "fetchMode", "allowedHosts", "upstreams", "rawRoutes", "routes", "protocols", "usageSchema", "usageExamples", "usageProfiles", "auth", "endpoints", "submitPaths", "actions":
 		default:
 			return Meta{}, &UnknownMetaFieldError{Field: field}
 		}
@@ -1095,6 +1100,10 @@ func decodeMeta(value any) (Meta, error) {
 	if err != nil {
 		return Meta{}, err
 	}
+	meta.RawRoutes, err = decodeRawRoutes(object["rawRoutes"])
+	if err != nil {
+		return Meta{}, err
+	}
 	meta.Routes, err = decodeRoutes(object["routes"])
 	if err != nil {
 		return Meta{}, err
@@ -1173,6 +1182,9 @@ func ValidateV1Meta(meta Meta) error {
 }
 
 func normalizeV1Meta(meta *Meta) error {
+	if err := normalizeRawRoutes(meta.RawRoutes); err != nil {
+		return err
+	}
 	seenCapabilities := make(map[string]bool, len(meta.RequiredCapabilities))
 	for _, name := range meta.RequiredCapabilities {
 		if !HasCapability(name) || seenCapabilities[name] {

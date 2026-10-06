@@ -6863,6 +6863,8 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Raw proxy": "Сырое проксирование",
+    "Forward provider requests through the raw routes declared by the plugin": "Передавать запросы провайдеру через raw-маршруты плагина"
   }
 }
